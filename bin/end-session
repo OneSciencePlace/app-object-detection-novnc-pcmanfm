@@ -1,0 +1,67 @@
+#!/bin/sh
+# end-session - end the whole session, not just the window manager.
+#
+# Closing the browser tab only detaches: Xvnc runs -AlwaysShared, so reopening
+# the URL puts you back in the same desktop with the windows where you left
+# them. That is deliberate -- a dropped link should not lose your work -- which
+# is why ending the session has to be something you ask for.
+#
+# What it does: signals the session supervisor (entrypoint.sh), which shuts the
+# gate, the applications, the window manager and the X server down in that
+# order. Under Docker the supervisor is PID 1, so the container then stops.
+# Under Apptainer there is no PID namespace and no container to stop, but the
+# same teardown runs and `apptainer run` returns.
+#
+#   end-session          ask first if there is a display, then end it
+#   end-session --force  no question
+set -eu
+
+_dir="${OSP_SESSION_DIR:-${TMPDIR:-/tmp}/session-$(id -u)}"
+_pidfile="$_dir/supervisor.pid"
+
+_force=0
+case "${1:-}" in
+    -f|--force) _force=1 ;;
+    -h|--help)
+        echo "Usage: end-session [--force]"
+        echo "Ends this desktop session and stops the container."
+        exit 0 ;;
+    "") ;;
+    *)  echo "end-session: unknown option '$1'" >&2; exit 2 ;;
+esac
+
+if [ ! -r "$_pidfile" ]; then
+    echo "end-session: no session supervisor recorded at $_pidfile." >&2
+    echo "end-session: this shell was not started by /app/entrypoint.sh, so" >&2
+    echo "end-session: there is no session for it to end." >&2
+    exit 1
+fi
+
+_pid="$(cat "$_pidfile")"
+case "$_pid" in
+    ''|*[!0-9]*) echo "end-session: '$_pidfile' does not contain a pid" >&2; exit 1 ;;
+esac
+if ! kill -0 "$_pid" 2>/dev/null; then
+    echo "end-session: supervisor $_pid is not running; nothing to do." >&2
+    exit 1
+fi
+
+# Ending the session throws away every unsaved window, so ask -- but only when
+# there is a display to ask on. From a headless `docker exec` there is nobody
+# to answer and the caller typed the command deliberately.
+if [ "$_force" -eq 0 ] && [ -n "${DISPLAY:-}" ]; then
+    _prompt="End this session?
+
+Every window closes and the container stops. Files you have
+already saved in your working directory are kept."
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --question --title="End session" --no-wrap \
+               --ok-label="End session" --cancel-label="Stay" \
+               --text="$_prompt" || exit 0
+    elif command -v xmessage >/dev/null 2>&1; then
+        xmessage -center -buttons "End session:0,Stay:1" "$_prompt" || exit 0
+    fi
+fi
+
+echo "end-session: asking the supervisor (pid $_pid) to shut down"
+kill -TERM "$_pid"

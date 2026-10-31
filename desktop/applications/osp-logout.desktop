@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Log out
+GenericName=End session
+Comment=Close every window and stop this container
+Exec=end-session
+Icon=system-log-out
+Terminal=false
+Categories=System;
+StartupNotify=false
