@@ -12,10 +12,7 @@ side as thumbnails, so the difference is visible before you open either one.
 Open either and you can flip between the original and the annotated version at
 the same size — which is the comparison that actually tells you something.
 
-It is one of two desktop versions. This is the light one: a compact desktop
-that starts quickly and keeps the image small. Its sibling offers a fuller
-desktop with a taskbar and a more conventional look. They run the same
-detection and produce identical results.
+The desktop is a light one: compact, quick to start, and small to download.
 
 ## Use cases
 
@@ -36,8 +33,7 @@ detection and produce identical results.
   showing you what to type.
 - The trained model, built in. Nothing is downloaded when you run it, so it
   works with no internet access.
-- A short guide, placed in your home folder the first time you start a
-  session.
+- A short guide, placed in your home folder when a session starts.
 
 Results are written next to your images in the same form the batch app
 produces, so a setting you work out here can be handed straight to a large run.

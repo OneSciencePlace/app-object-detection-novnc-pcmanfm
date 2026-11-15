@@ -1,3 +1,8 @@
+# The shared session files (web/: the session contract, the token gate, the
+# supervisor) come from app-template's kit image rather than a copy kept in
+# this repo: a fix to them reaches this image by bumping this line.
+FROM ghcr.io/onescienceplace/app-kit:1.1.0@sha256:8be57aac17696826c15692cf256dc69681ecf7b6137021ebeef09e4776118368 AS kit
+
 FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -9,11 +14,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 #    shell out to fbsetbg, which needs one of feh / Esetroot / display /
 #    hsetroot to exist. With none of them installed fbsetbg pops its complaint
 #    up as an xmessage dialog ON THE DESKTOP -- the first thing a user sees.
+#    bash is the entrypoint's shell (web/supervise.sh needs `wait -n`); it is
+#    in the base image already and listed so that stays true.
 #
 # 2. The desktop: PCManFM draws the background and the icons AND provides the
 #    file windows; tumbler is what puts image thumbnails in them (without it
 #    every photo is a generic icon, which defeats the purpose); ristretto is
-#    the viewer; dbus-x11 is what tumbler and GTK's file chooser talk over.
+#    the viewer; dbus-daemon runs the session bus that tumbler and GTK's file
+#    chooser talk over (the entrypoint starts it on a socket in the session
+#    directory; dbus-x11 stays because packages here expect it).
 #    An icon theme is not decoration either -- GTK apps with no icon theme
 #    installed render as unlabelled blank squares. Nor is mousepad: with no
 #    application on the system claiming text/plain, double-clicking a .txt or
@@ -25,7 +34,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # 3. Python, for the detector. Same CPU-only torch and ultralytics pins as
 #    app-object-detection. libgl1/libglib2.0-0: opencv-python links libGL.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
+        ca-certificates bash \
         tigervnc-standalone-server tigervnc-common xauth \
         novnc websockify \
         fluxbox xterm x11-utils \
@@ -33,12 +42,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nginx-light gettext-base \
         pcmanfm ristretto xfce4-terminal mousepad \
         tumbler tumbler-plugins-extra \
-        dbus-x11 shared-mime-info xdg-utils desktop-file-utils zenity \
+        dbus-daemon dbus-x11 shared-mime-info xdg-utils desktop-file-utils zenity \
         adwaita-icon-theme papirus-icon-theme gnome-themes-extra \
         librsvg2-common fonts-dejavu-core \
         python3 python3-venv \
         libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
+
+# Fail the build, not the session, if a package lacks what the entrypoint
+# depends on (what the gate and the supervisor need is checked by the kit's
+# check-deps.sh, once web/ is in place below):
+#   - Xvnc must listen for RFB on a Unix socket (rfbunixpath). TigerVNC's help
+#     lists its parameters without the leading dash.
+#   - websockify must listen on a Unix socket (--unix-listen).
+#   - dbus-daemon runs the session bus on a socket the entrypoint names.
+RUN set -e; \
+    Xvnc -help 2>&1 | grep -q rfbunixpath \
+        || { echo "Xvnc has no rfbunixpath option" >&2; exit 1; }; \
+    websockify --help 2>&1 | grep -q -- '--unix-listen' \
+        || { echo "websockify has no --unix-listen option" >&2; exit 1; }; \
+    command -v dbus-daemon >/dev/null \
+        || { echo "no dbus-daemon" >&2; exit 1; }; \
+    echo "[build] Xvnc, websockify and dbus-daemon support what the entrypoint needs"
 
 WORKDIR /app
 
@@ -119,18 +144,18 @@ RUN set -eu; \
     useradd --create-home --uid ${OSP_UID} --gid ${OSP_UID} --shell /bin/bash ospuser; \
     chmod 1777 /home/ospuser
 
-# A .sif is mounted read-only, so every library scratch path goes to /tmp and
-# the model weights are baked in at a fixed absolute path. APP_MODEL is the
-# same variable run.py reads, with the same default, so this image and the
-# batch app resolve to identical weights.
+# A .sif is mounted read-only, so every library scratch path has a fallback in
+# /tmp and the model weights are baked in at a fixed absolute path. APP_MODEL
+# is the same variable run.py reads, with the same default, so this image and
+# the batch app resolve to identical weights.
 #
-# XDG_CACHE_HOME and XDG_RUNTIME_DIR get a uid suffix in entrypoint.sh rather
-# than a fixed value here: under Apptainer /tmp is the compute node's, shared
-# with everyone on it, and both directories are created 0700 by the things that
-# use them. These are the fallbacks for a bare `docker run`.
+# The /tmp fallbacks are never used as they are: at session start
+# web/session-env.sh (XDG_CACHE_HOME) and entrypoint.sh (MPLCONFIGDIR,
+# YOLO_CONFIG_DIR) move each one still in effect to a directory of the
+# session's own under $TMPDIR. XDG_RUNTIME_DIR is not set here: the entrypoint
+# puts it inside the session's private directory.
 ENV HOME=/home/ospuser \
     XDG_CACHE_HOME=/tmp/.cache \
-    XDG_RUNTIME_DIR=/tmp/run \
     MPLCONFIGDIR=/tmp/matplotlib \
     YOLO_CONFIG_DIR=/tmp/Ultralytics \
     APP_MODEL=/app/yolo11n.pt
@@ -141,18 +166,18 @@ ENV HOME=/home/ospuser \
 # app-object-detection so the two produce comparable results.
 RUN python3 -c "from ultralytics import YOLO; YOLO('yolo11n.pt')"
 
-# Branch B of the interactive contract: VNC has no URL-token auth, so the
-# nginx gate owns OSP_APP_PORT and websockify hides on OSP_APP_UPSTREAM_PORT.
+# VNC has no URL-token auth, so the nginx gate owns OSP_APP_PORT and
+# websockify sits behind it on a Unix socket in the session directory.
 # OSP_APP_TOKEN_NAME is deliberately NOT an ENV here. Its value is a parameter
 # name, not a secret, but BuildKit's SecretsUsedInArgOrEnv check matches on
-# the word TOKEN and warns. web/session-env.sh already defaults it to `token`,
-# so the ENV was redundant.
+# the word TOKEN and warns. web/session-env.sh already defaults it to `token`.
+# OSP_APP_BIND defaults to 127.0.0.1 in web/session-env.sh; a local
+# `docker run -p` needs -e OSP_APP_BIND=0.0.0.0.
 ENV OSP_APP_PORT=6080 \
-    OSP_APP_UPSTREAM_PORT=6081 \
     VNC_GEOMETRY=1920x1080
 # VNC_DISPLAY is deliberately unset: entrypoint.sh walks :1, :2, ... for a
-# free one, because display numbers are global to the node. Set it at run
-# time only to demand a specific number.
+# free one, because display numbers are global to the node when /tmp is
+# shared. Set it at run time only to demand a specific number.
 EXPOSE 6080
 
 # /etc/passwd group-writable so entrypoint can add an entry for the runtime uid
@@ -163,7 +188,8 @@ RUN chmod g=u /etc/passwd /etc/group
 COPY run.py /app/run.py
 COPY bin/ /app/bin/
 COPY desktop/ /app/desktop/
-COPY web/ /app/web/
+COPY --from=kit /app/web/ /app/web/
+RUN /app/web/check-deps.sh
 COPY entrypoint.sh /app/entrypoint.sh
 
 # The wallpaper is generated, not committed: Pillow is already here as an
@@ -208,11 +234,20 @@ RUN ln -s /app/bin/detect       /usr/local/bin/detect \
 # made under a restrictive umask yields 0600/0700 files that the runtime user --
 # `docker run --user`, or any user at all under Apptainer -- cannot even read.
 # Git only tracks the exec bit, so this is not something the repo can guarantee.
+# The kit's files arrive with their modes set.
 RUN chmod -R a+rX /app /opt/venv \
     && chmod 0755 /app/entrypoint.sh \
-                  /app/web/token-gate.sh /app/web/session-env.sh \
                   /app/bin/detect /app/bin/detect-shell /app/bin/end-session \
                   /app/desktop/make-wallpaper.py
+
+# No setuid or setgid files (plan S-7). /etc/passwd is group-writable above,
+# and under Docker without no-new-privileges, that plus a setuid `su` is a way
+# to root inside the container. Apptainer mounts the image nosuid anyway. Keep
+# this after the last package install; the build fails if any are left.
+RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true; \
+    _left="$(find / -xdev -perm /6000 -type f 2>/dev/null | head -5)"; \
+    if [ -n "$_left" ]; then printf '%s\n' "$_left" >&2; \
+        echo "setuid/setgid files remain (above)" >&2; exit 1; fi
 
 # The working directory is ospuser's home: it is where the desktop opens, where
 # the Files window starts, and where run.py reads and writes. Docker gets it

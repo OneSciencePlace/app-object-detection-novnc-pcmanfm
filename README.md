@@ -1,16 +1,14 @@
 # app-object-detection-novnc-pcmanfm
 
-The lightweight desktop sibling of
+The desktop version of
 [`app-object-detection`](https://github.com/OneSciencePlace/app-object-detection).
 Same `run.py`, same weights, same outputs — but you get a terminal to run it
 from and a file browser to look at the results in, both in a browser tab.
 
-It is one of a pair. [`app-object-detection-novnc-xfce`](https://github.com/OneSciencePlace/app-object-detection-novnc-xfce)
-is the same application on a full XFCE session. This one is fluxbox plus
-PCManFM: one package for the background, the icons and the file windows, and
-five ini files of configuration. Everything below the desktop layer is
-identical between them — the same `run.py`, `detect`, gate, session contract
-and supervisor.
+The desktop is fluxbox plus PCManFM: one package for the background, the
+icons and the file windows, and five ini files of configuration. (An XFCE
+version, `app-object-detection-novnc-xfce`, was dropped in 2026-11: a full
+session manager was more to configure and secure than it was worth here.)
 
 ```
 app-object-detection          app-object-detection-jupyter      this repo
@@ -20,19 +18,19 @@ run.py --image photo.jpg  ──▶  a notebook, cell by cell    ──▶  a de
               └──── yolo11n.pt, <stem>_detected.jpg, detections.json ──┘
 ```
 
-It is built on `app-novnc`: **branch B** of the interactive contract. VNC has
-no URL-token auth, so the nginx gate owns the single exposed port and
-everything else hides on loopback.
+It is built on `app-novnc`: VNC has no URL-token auth, so the nginx gate owns
+the one TCP port and everything behind it is a Unix socket in the session's
+private directory.
 
 ```
-browser ──https──▶ Satellite ──http──▶ 0.0.0.0:OSP_APP_PORT          nginx gate
-                                              │  cookie / 403
-                                              ▼
-                                       127.0.0.1:OSP_APP_UPSTREAM_PORT  websockify
-                                              │  + noVNC static files
-                                              ▼
-                                       127.0.0.1:590<n>   Xvnc + fluxbox
-                                                          + PCManFM + ristretto
+browser ──https──▶ Satellite ──ssh tunnel──▶ 127.0.0.1:OSP_APP_PORT   nginx gate
+                                                    │  cookie / 403
+                                                    ▼
+                                    $OSP_APP_SOCK_DIR/app.sock        websockify
+                                                    │  + noVNC static files
+                                                    ▼
+                                    $OSP_APP_SOCK_DIR/vnc.sock        Xvnc + fluxbox
+                                                                      + PCManFM + ristretto
 ```
 
 ## Contents
@@ -43,44 +41,69 @@ browser ──https──▶ Satellite ──http──▶ 0.0.0.0:OSP_APP_PORT 
 | `run.py` | The program — **byte-for-byte** `app-object-detection`'s. |
 | `bin/detect` | The wrapper users actually type. Adds a bare-filename form and `--open`. |
 | `bin/detect-shell` | What the desktop's *Object detection* launcher opens: a terminal that has already printed the help. |
-| `bin/end-session` | Ends the session: signals the supervisor, which shuts everything down in order. |
+| `bin/end-session` | Logs out: asks the session leader (fluxbox) to quit; the supervisor then stops everything else. |
 | `requirements.txt` | Pinned Python deps, held in step with the batch app. |
 | `desktop/skel/` | Desktop configuration seeded into the session home at startup. |
 | `desktop/applications/` | The `.desktop` launchers, installed to `/usr/share/applications`. |
 | `desktop/make-wallpaper.py` | Generates the background at build time. |
-| `entrypoint.sh` | The image ENTRYPOINT. Starts Xvnc, the desktop, websockify, then `exec`s the gate. |
-| `web/` | The interactive session contract and the token gate. Copied verbatim from `app-novnc`. |
+| `entrypoint.sh` | The image ENTRYPOINT. Starts Xvnc, the session bus, the desktop, websockify and the gate, and supervises them. |
+
+`web/` (the session contract, the token gate, the supervisor) is not in this
+repository: the build copies it from the kit image named at the top of the
+`Dockerfile` (`ghcr.io/onescienceplace/app-kit`), pinned by digest.
 | `.github/workflows/build-and-push.yml` | Build + push both artifacts. App-agnostic — copy as-is. |
 
 ## Run it
 
-```bash
-TOKEN=$(openssl rand -hex 32)
+The token is never put on a command line: `ps` shows command lines to every
+user on a node. Pass it through the environment.
 
+```bash
+export OSP_APP_TOKEN=$(openssl rand -hex 32)
+
+# Docker (local). -e OSP_APP_TOKEN with no "=value" copies it from your
+# environment. OSP_APP_BIND=0.0.0.0 because `-p` cannot reach a container's
+# loopback; the host side is still published on 127.0.0.1 only.
 docker run --rm --user "$(id -u):$(id -g)" \
-  -p 6080:6080 -v "$PWD:/home/ospuser" \
-  -e OSP_APP_PORT=6080 -e OSP_APP_TOKEN="$TOKEN" \
+  -p 127.0.0.1:6080:6080 -v "$PWD:/home/ospuser" \
+  -e OSP_APP_PORT=6080 -e OSP_APP_BIND=0.0.0.0 -e OSP_APP_TOKEN \
   ghcr.io/onescienceplace/app-object-detection-novnc-pcmanfm:latest
 
-apptainer pull oras://ghcr.io/onescienceplace/app-object-detection-novnc-pcmanfm-sif:latest
-apptainer run --env OSP_APP_PORT=6080 --env OSP_APP_TOKEN="$TOKEN" \
+# Apptainer, under the OSP interactive run profile.
+# APPTAINERENV_<NAME> reaches the container as <NAME>, even with --cleanenv.
+apptainer pull oras://ghcr.io/onescienceplace/app-object-detection-novnc-pcmanfm-sif:latest   # production pins <version>@sha256:<digest>
+export APPTAINERENV_OSP_APP_TOKEN="$OSP_APP_TOKEN"
+apptainer run \
+  --contain --pid --ipc --cleanenv --no-mount bind-paths,cwd \
+  --pwd "$PWD" --bind "$PWD:$PWD" \
+  --env OSP_APP_PORT=6080 --env TMPDIR="$PWD/tmp" \
   app-object-detection-novnc-pcmanfm-sif_latest.sif
 ```
 
-Then open `https://<session>.<satellite-domain>/?token=$TOKEN`. A desktop comes
-up with a Files window and a terminal already open on your working directory.
+Through OSP, open `https://<session-label>.<sat-id>.sat.<domain>/?token=<token>`.
+Locally, `http://localhost:6080/?token=$OSP_APP_TOKEN` (Docker), or forward the
+port first for Apptainer on a cluster node: `ssh -L 6080:127.0.0.1:6080 <node>`.
+A desktop comes up with a Files window and a terminal already open on your
+working directory.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `OSP_APP_PORT` | `6080` | the single port served — the nginx gate |
-| `OSP_APP_TOKEN` | generated | per-session secret |
-| `OSP_APP_TOKEN_NAME` | `token` | query parameter the token arrives in |
-| `OSP_APP_UPSTREAM_PORT` | `6081` | loopback-only: websockify + noVNC |
-| `VNC_DISPLAY` | auto | X display; RFB port is `5900 + n`. Unset by default — see below |
+| `OSP_APP_PORT` | `6080` | the one TCP port — the nginx gate |
+| `OSP_APP_BIND` | `127.0.0.1` | address the gate listens on; `0.0.0.0` only for local `docker run -p` |
+| `OSP_APP_TOKEN` | generated | per-session secret; environment only, never a command-line argument |
+| `OSP_APP_TOKEN_NAME` | `token` | query parameter the token arrives in (`[A-Za-z0-9_]`) |
+| `VNC_DISPLAY` | auto | X display number. Unset by default — see below |
 | `VNC_GEOMETRY` | `1920x1080` | desktop size |
+| `OSP_APP_HEALTH_PATH` | `vnc.html` | what the gate's `/healthz` asks websockify for |
 | `APP_MODEL` | `/app/yolo11n.pt` | the baked-in weights; same variable `run.py` reads |
 | `OSP_HOME` | `$HOME` | where the desktop configuration is seeded |
 | `OSP_SEED_DESKTOP` | `1` | set `0` to add nothing to the home directory |
+
+`OSP_APP_SOCK_DIR` is set by `web/session-env.sh`, never by the caller: a fresh
+`0700` directory under `/tmp` that holds every secret, socket and rendered
+config of the session. `OSP_WORK_DIR` is set by the entrypoint: the working
+directory the session started in, where the Files window, the terminals and
+`detect` work.
 
 ## `detect`
 
@@ -119,9 +142,10 @@ fluxbox is the window manager, unchanged from `app-novnc`. On top of it:
   windows. The icon view has thumbnails on, so `photo.jpg` and
   `photo_detected.jpg` sit next to each other and the difference is visible
   before you open either.
-- **tumbler** is what makes those thumbnails exist. It is dbus-activated, which
-  is why `entrypoint.sh` starts a session bus. Without one you get generic
-  file icons and no explanation.
+- **tumbler** is what makes those thumbnails exist. It is D-Bus-activated,
+  which is why `entrypoint.sh` starts a session bus, on a socket in the
+  session directory (see *Design notes*). Without one you get generic file
+  icons and no explanation.
 - **ristretto** is the image viewer and **mousepad** the text editor, wired to
   every image and text type through `/usr/share/applications/mimeapps.list`.
   An editor is not a luxury: with no application on the system claiming
@@ -153,42 +177,42 @@ images in the directory before handing you a prompt), and *Log out*.
 reopening the URL puts you back in the same desktop with the windows where you
 left them. That is deliberate: a dropped link should not cost you your work.
 
-Ending the session is therefore something you ask for — *Log out* on the
-desktop, or `end-session` in a terminal. Either signals the session supervisor,
-which shuts the gate and websockify first (so nothing new lands on a desktop
-that is going away), then the applications and the window manager, then the X
-server last — killing X first turns every one of those into a crash. Under
-Docker the supervisor is PID 1, so the container then stops; under Apptainer
-the same teardown runs and `apptainer run` returns.
+Ending the session is therefore something you ask for: *Log out* on the
+desktop or in the fluxbox menu, `end-session` in a terminal, or
+Ctrl+Alt+Delete. Each one makes fluxbox, the session leader, quit; the
+supervisor sees it go and stops the rest. Under Docker the container then
+stops; under Apptainer `apptainer run` returns.
 
 `end-session` asks for confirmation through zenity when there is a display, and
 takes `--force` when there is not. From a headless `docker exec` it does not
 ask, on the grounds that whoever typed it meant it.
 
-### Why `entrypoint.sh` no longer `exec`s the gate
+### Supervision
 
-CONVENTIONS §3 says an entrypoint ends by `exec`ing the real program, so that
-it becomes PID 1 and receives signals. This app has no single real program: it
-is six processes. `exec`ing the gate replaced the shell that owned them — and
-took its `trap` with it, so the orderly shutdown written a hundred lines
-earlier had never run, not once. Nothing was ever *stopped*; it was destroyed
-when the container's namespace went away, and under Apptainer, where there is
-no namespace to go away, not even that.
+The session is several processes, so the entrypoint does not `exec` any of
+them; it stays and supervises them through `web/supervise.sh` (from the kit),
+the same supervisor as `app-novnc`. Each service runs in its own process
+group, so stopping it stops what it started too:
 
-So the shell stays and supervises. It is still PID 1 under Docker and still
-receives the container's `SIGTERM` — more faithfully than before, because now
-something acts on it. It also notices if the desktop, the X server or the gate
-dies, and shuts the rest down rather than leaving a session that is half alive
-and unreachable.
+| Service | Kind | If it exits |
+|---|---|---|
+| Xvnc | critical | the session ends (`1`) |
+| fluxbox | leader | a normal exit is a log-out (`0`); anything else `1` |
+| websockify | critical | the session ends (`1`): without it the gate would answer 502 |
+| the gate (nginx) | critical | the session ends (`1`) |
+| the session bus, PCManFM's desktop, the terminal | helper | nothing; the desktop carries on without it |
 
-Two costs, both handled. A shell at PID 1 has to reap its own children, so the
-liveness check reaps as it goes — which also matters for correctness, because
-`kill -0` succeeds for a zombie and a naive check would never notice the
-desktop exiting. And the loop polls at two seconds rather than blocking on
-`wait`, because POSIX `wait PID` blocks on one child and bare `wait` blocks on
-all of them, and what is needed is whichever of three goes first.
+A canceled job or `docker stop` (SIGTERM) ends it with `143`. Cleanup stops
+everything in reverse start order — the gate and websockify first, so nothing
+new lands on a desktop that is going away; then the applications; the X server
+last, because killing X first turns every application into a crash — and then
+removes the session directory.
 
-**`app-novnc` still has the original dead trap**, since it has the same shape.
+Every service except the gate starts without `OSP_APP_TOKEN` in its
+environment, so the desktop, its terminals, the session bus and whatever the
+user runs never hold the token. Service output reaches the job's stderr with a
+`[name] ` prefix; fluxbox's own chatter goes to `fluxbox.log` in the session
+directory.
 
 ### Where the desktop configuration lives, and why it is split
 
@@ -225,32 +249,29 @@ reverse-DNS id at some point; ours will not be renamed underneath us.
 
 There is no settings daemon in this image, so GTK, PCManFM and fluxbox each
 read their configuration from `$HOME`. `/app` is inside the `.sif` and mounted
-read-only, and under Apptainer `$HOME` is the caller's own directory, which the
-image never sees at build time — so the only moment the configuration can be
-put in place is startup.
+read-only, and under Apptainer `$HOME` is not the image's, so the only moment
+the configuration can be put in place is startup.
 
 `entrypoint.sh` copies `desktop/skel/` into the session home and **never
-overwrites an existing file**: your `gtk-3.0/settings.ini` and your edited
-launchers survive a restart. What it adds is
+overwrites an existing file**. What it adds is
 `~/.config/gtk-3.0/settings.ini`, `~/.config/pcmanfm/default/pcmanfm.conf`,
 `~/.fluxbox/menu`, `~/Desktop/osp-*.desktop` and
 `~/README-object-detection.txt`. If you would rather it added nothing, set
 `OSP_SEED_DESKTOP=0`. Note what is *not* in that list: the two system defaults
 above, precisely so that fixing one of them reaches an existing home.
 
-**The corollary, which bites when you update the image.** A home directory
-carried over from an older version — a bind mount you keep, or your real home
-under Apptainer — keeps that version's configuration, so a fixed default never
-reaches you. The entrypoint says so on startup (`N file(s) seeded, M already
-yours`) and prints what to remove:
+Under the run profile (`--contain`) the home is private to the session, small
+(about 64 MB) and empty at every start, so seeding runs every session and
+nothing saved in `~` survives it. Save your work in the working directory.
+
+**Where a home does persist** — a bind mount you keep, or a Docker container
+you reuse — it keeps the configuration of the image version that seeded it, so
+a fixed default never reaches you. The entrypoint says so on startup
+(`N file(s) seeded, M already yours`) and prints what to remove:
 
 ```bash
 rm -rf ~/.config/pcmanfm ~/.config/gtk-3.0 ~/.fluxbox/menu ~/Desktop
 ```
-
-Not overwriting is the right default — it is what protects an edited launcher —
-but it does mean "I pulled the new image and the bug is still there" is
-answered by that line in the log.
 
 ### Home versus working directory
 
@@ -258,43 +279,71 @@ Under Docker they are the same: `USER ospuser`, `WORKDIR /home/ospuser`, and
 that home is mode 1777 so the runtime uid — whatever `--user` you pass — can
 write to it.
 
-Under Apptainer they differ, and that is deliberate. `$HOME` is your real home,
-which is where desktop configuration belongs. `$PWD` is the directory you ran
-`apptainer run` from, which is where your images are. The Files window and the
-terminal both open on `$PWD`; the Desktop launchers open `$HOME`. `run.py`
-reads and writes relative paths, so results land beside their inputs either way.
+Under Apptainer they differ, and that is deliberate. `$HOME` holds the desktop
+configuration and, under the run profile, is the session's own and gone at
+the end. The working directory — the job directory, or wherever you ran
+`apptainer run` — is where your images are and where results belong. The Files
+window, the terminals, the *Object detection* launcher and the other Desktop
+launchers all open on it, and `run.py` reads and writes relative paths, so
+results land beside their inputs.
 
 ## Design notes
 
-Inherited from `app-novnc`, and the reasoning there applies verbatim:
+Inherited from `app-novnc`, where they are explained at more length:
 
-**Display numbers are node-global.** The X lock (`/tmp/.X<n>-lock`) and socket
-(`/tmp/.X11-unix/X<n>`) live in a `/tmp` that Apptainer usually shares with
-every other user on the node, so the entrypoint walks `:1, :2, …` until one
-takes rather than hardcoding `:1`.
+**One TCP listener, on loopback.** Only the gate has a TCP port, and it binds
+`127.0.0.1` — the launcher's reverse SSH tunnel connects there. websockify and
+Xvnc have no TCP port at all: under Apptainer the container shares the node's
+network, so a loopback port would be reachable by every other process on the
+node, token or no token.
 
-**One port, one secret.** Only `OSP_APP_PORT` is bound on `0.0.0.0`. websockify
-and Xvnc bind `127.0.0.1` and are unreachable from off-node. Xvnc runs
-`-SecurityTypes None -localhost` with no VNC password on purpose: its only
-client is websockify in this same container, and the browser-facing
-authentication is the token gate.
+**Behind the gate, Unix sockets only.** Xvnc listens for RFB on
+`$OSP_APP_SOCK_DIR/vnc.sock` (`-rfbunixpath`, `-rfbport -1`), websockify on
+`$OSP_APP_SOCK_DIR/app.sock` (`--unix-listen`), both `0600` in a `0700`
+directory. Xvnc runs `-nolisten tcp -nolisten local`: the second removes the X
+server's *abstract* socket, which lives in the shared network namespace. Xvnc
+has no VNC password (`-SecurityTypes None`): no socket anyone outside the
+session can reach, and the gate is the authentication.
 
-**The autoconnect page.** noVNC's client is `vnc.html` and needs query
-parameters, but the gate strips the query string after the token exchange — so
-the image bakes an `index.html` that redirects to `vnc.html?autoconnect=true…`.
+**The session directory.** `$OSP_APP_SOCK_DIR` is created under `/tmp`, never
+under `$TMPDIR` (the job directory on shared storage under the run profile).
+The rendered `nginx.conf` (which holds the token), the X cookie, the sockets,
+`XDG_RUNTIME_DIR`, the supervisor's `leader.pid` and the seeding list all live
+there, and it is removed when the session ends. websockify's own temporary
+files go there too: since Python 3.14 its multiprocessing listens on a Unix
+socket in the temporary directory, which must not be the job directory.
 
-**Scratch paths.** The entrypoint does not trust `$TMPDIR`; it probes
-`$TMPDIR`, `/tmp`, `$HOME` and says on stderr which it took.
+**Display numbers, `/tmp/.X11-unix`, the autoconnect page, websockets,
+scratch paths.** As in `app-novnc`: the entrypoint walks `:1, :2, …` when
+`/tmp` is shared; creates `/tmp/.X11-unix` mode `1777` and stops with a clear
+message if it is not writable; the image bakes an `index.html` that redirects
+to `vnc.html?autoconnect=true…`; and it probes `$TMPDIR`, `/tmp`, `$HOME` for
+bulk scratch rather than trusting an inherited `$TMPDIR`. Never bind a scratch
+*parent* (`/scratch`) to fix a missing `$TMPDIR`: it exposes every other job's
+directory to the same uid.
+
+**Readiness.** `GET /healthz` is ungated and returns `ok` (200) once websockify
+answers on its socket, 503 before.
 
 Added here:
 
-**More XDG paths get the uid suffix.** `app-novnc` sets `XDG_RUNTIME_DIR=/tmp/run`
-as an `ENV`. On a shared node that is a fixed node-global name, and dbus creates
-it `0700` — so the second user on the node cannot write to the first one's
-directory. This entrypoint derives `XDG_RUNTIME_DIR`, `XDG_CACHE_HOME`,
-`MPLCONFIGDIR` and `YOLO_CONFIG_DIR` from `$TMPDIR` and the uid, the same way
-the nginx gate already scopes its own directory. The `ENV` values remain as the
-fallback for a bare `docker run`. **Worth backporting to `app-novnc`.**
+**The session bus on a filesystem socket.** `dbus-launch`'s default address,
+`unix:tmpdir=/tmp`, can give an *abstract* socket, and D-Bus lets any process
+of the same uid in — so on a shared account, any other session on the node.
+The entrypoint runs `dbus-daemon --session` on
+`$OSP_APP_SOCK_DIR/dbus.sock` instead, and exports that address even if the
+bus fails to start, so nothing "autolaunches" a bus of its own. GTK's
+accessibility bridge, which would start a second bus, is off (`NO_AT_BRIDGE=1`).
+
+**Caches per session, under `$TMPDIR`.** `XDG_CACHE_HOME` (thumbnails),
+`MPLCONFIGDIR` and `YOLO_CONFIG_DIR` hold nothing secret and can grow, so they
+go under `$TMPDIR/<session directory name>/`, not in the small private `/tmp`.
+The image's `/tmp/...` values are fallbacks, replaced at start while still in
+effect; a value the job sets is kept.
+
+**No setuid or setgid files.** The build strips them and fails if any remain:
+`/etc/passwd` is group-writable (for `--user "$(id -u):0"`), and under Docker
+without `no-new-privileges` that plus a setuid `su` is a way to root.
 
 **A venv rather than `--break-system-packages`.** Ubuntu marks its system
 Python externally-managed (PEP 668). `/opt/venv` keeps the detector's pinned
@@ -332,15 +381,24 @@ fails, that is the name to check first.
 Skip GitHub and the registry entirely:
 
 ```bash
+bash -n entrypoint.sh                        # syntax, before anything else
+# web/ is not in this repository: the build copies it from the kit image named
+# at the top of the Dockerfile (ghcr.io/onescienceplace/app-kit).
 docker build -t app-object-detection-novnc-pcmanfm:dev .   # --platform linux/amd64 on Apple Silicon
 docker run --rm --user "$(id -u):$(id -g)" \
-  -p 6080:6080 -v "$PWD:/home/ospuser" \
-  -e OSP_APP_PORT=6080 -e OSP_APP_TOKEN=localdev app-object-detection-novnc-pcmanfm:dev
+  -p 127.0.0.1:6080:6080 -v "$PWD:/home/ospuser" \
+  -e OSP_APP_PORT=6080 -e OSP_APP_BIND=0.0.0.0 -e OSP_APP_TOKEN=localdev \
+  app-object-detection-novnc-pcmanfm:dev
 
 docker save app-object-detection-novnc-pcmanfm:dev -o aodnp.tar
 apptainer build aodnp.sif docker-archive://aodnp.tar
-apptainer run --env OSP_APP_PORT=6080 --env OSP_APP_TOKEN=localdev aodnp.sif
+export APPTAINERENV_OSP_APP_TOKEN=localdev
+apptainer run --contain --pid --ipc --cleanenv --no-mount bind-paths,cwd \
+  --pwd "$PWD" --bind "$PWD:$PWD" --env OSP_APP_PORT=6080 --env TMPDIR="$PWD/tmp" aodnp.sif
 ```
+
+(`localdev` on the command line is fine for a throwaway local token; never do
+it with a real one.)
 
 Open `http://localhost:6080/?token=localdev`. Use *localhost*, not the host's
 IP: the gate's cookie is marked `Secure`, and browsers make an exception for
@@ -352,6 +410,10 @@ desktop configuration was seeded into a writable home rather than failing
 silently; that thumbnails appear in the Files window (if they do not, the
 session bus did not come up — the entrypoint says so on stderr); and that
 `detect` runs with no network at all.
+
+Isolation between two sessions of the same account is checked per system and
+per image, before interactive apps are offered there (OSP's internal
+validation procedure).
 
 ### Why `--user`
 
