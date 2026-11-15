@@ -2,9 +2,12 @@
 # detect-shell - what the "Object detection" desktop launcher opens.
 #
 # A terminal that has already told you what to type, sitting in the directory
-# where your images are. Kept separate from a long Exec= line in the .desktop
-# file, where the quoting is unreadable and the shell is not the one you think.
-cd "${HOME:-/tmp}" 2>/dev/null || true
+# where your images are: the session's working directory (OSP_WORK_DIR, set by
+# the entrypoint), not the home directory, which under the run profile holds
+# only settings and does not outlive the session. Kept separate from a long
+# Exec= line in the .desktop file, where the quoting is unreadable and the
+# shell is not the one you think.
+cd "${OSP_WORK_DIR:-${HOME:-/tmp}}" 2>/dev/null || true
 
 detect --help || true
 echo

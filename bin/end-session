@@ -1,23 +1,23 @@
 #!/bin/sh
-# end-session - end the whole session, not just the window manager.
+# end-session - log out: end the whole session, not just one window.
 #
 # Closing the browser tab only detaches: Xvnc runs -AlwaysShared, so reopening
 # the URL puts you back in the same desktop with the windows where you left
 # them. That is deliberate -- a dropped link should not lose your work -- which
 # is why ending the session has to be something you ask for.
 #
-# What it does: signals the session supervisor (entrypoint.sh), which shuts the
-# gate, the applications, the window manager and the X server down in that
-# order. Under Docker the supervisor is PID 1, so the container then stops.
-# Under Apptainer there is no PID namespace and no container to stop, but the
-# same teardown runs and `apptainer run` returns.
+# What it does: asks the session leader (the process whose clean exit is a
+# log-out) to quit. The supervisor (entrypoint.sh, web/supervise.sh) sees it go
+# and stops everything else -- the gate, the applications, the X server -- and
+# the session ends with status 0, as a log-out should. Under Docker the
+# container then stops; under Apptainer `apptainer run` returns.
 #
 #   end-session          ask first if there is a display, then end it
 #   end-session --force  no question
 set -eu
 
-_dir="${OSP_SESSION_DIR:-${TMPDIR:-/tmp}/session-$(id -u)}"
-_pidfile="$_dir/supervisor.pid"
+_dir="${OSP_APP_SOCK_DIR:-}"
+_pidfile="$_dir/leader.pid"
 
 _force=0
 case "${1:-}" in
@@ -30,8 +30,8 @@ case "${1:-}" in
     *)  echo "end-session: unknown option '$1'" >&2; exit 2 ;;
 esac
 
-if [ ! -r "$_pidfile" ]; then
-    echo "end-session: no session supervisor recorded at $_pidfile." >&2
+if [ -z "$_dir" ] || [ ! -r "$_pidfile" ]; then
+    echo "end-session: no session leader recorded (OSP_APP_SOCK_DIR/leader.pid)." >&2
     echo "end-session: this shell was not started by /app/entrypoint.sh, so" >&2
     echo "end-session: there is no session for it to end." >&2
     exit 1
@@ -42,9 +42,10 @@ case "$_pid" in
     ''|*[!0-9]*) echo "end-session: '$_pidfile' does not contain a pid" >&2; exit 1 ;;
 esac
 if ! kill -0 "$_pid" 2>/dev/null; then
-    echo "end-session: supervisor $_pid is not running; nothing to do." >&2
+    echo "end-session: session leader $_pid is not running; nothing to do." >&2
     exit 1
 fi
+_comm="$(cat "/proc/$_pid/comm" 2>/dev/null || true)"
 
 # Ending the session throws away every unsaved window, so ask -- but only when
 # there is a display to ask on. From a headless `docker exec` there is nobody
@@ -63,5 +64,6 @@ already saved in your working directory are kept."
     fi
 fi
 
-echo "end-session: asking the supervisor (pid $_pid) to shut down"
+# The leader is fluxbox, which exits 0 on TERM: a normal log-out.
+echo "end-session: logging out (session leader $_comm, pid $_pid)"
 kill -TERM "$_pid"

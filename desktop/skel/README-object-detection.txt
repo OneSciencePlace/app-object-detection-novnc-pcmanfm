@@ -1,14 +1,15 @@
 Object detection — how to use this desktop
 ==========================================
 
-Everything happens in this folder. Put an image here (or find one you have
-mounted), run the detector on it, and look at the result.
+Everything happens in your working directory: the folder the session started
+in, which the Files window and the terminal open on. Put an image there, run
+the detector on it, and look at the result.
 
-1. Get an image in here
------------------------
-If you started the container with a bind mount, whatever was in that directory
-is already here. Otherwise drag a file into the Files window, or fetch one in
-the terminal.
+1. Get an image in there
+------------------------
+Whatever was in the working directory when the session started is already
+there. Otherwise drag a file into the Files window, or fetch one in the
+terminal.
 
 2. Run the detector
 -------------------
@@ -46,9 +47,14 @@ object, with the class name, the confidence and the box coordinates.
 
 4. Keeping your results
 -----------------------
-This home directory lives inside the container unless you bind-mounted it.
-Under Docker that means `-v "$PWD:/home/ospuser"`; under Apptainer you are
-already in your own directory and nothing is lost.
+Keep everything you want in the working directory: results land there, beside
+their images, and it outlives the session.
+
+The home directory, where this guide is, holds the desktop's settings only.
+On a cluster or through a science gateway it is private to this session and
+small, and it is emptied when the session ends: anything saved there is lost.
+Under Docker it is the folder you mounted (`-v "$PWD:/home/ospuser"`), which
+is also the working directory.
 
 The model
 ---------
